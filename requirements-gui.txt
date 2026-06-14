@@ -1,0 +1,5 @@
+# Optional — only needed on machines that run the desktop control app
+# (python -m muffin.gui). The manager and worker themselves don't need this.
+PySide6>=6.6
+psutil>=5.9
+

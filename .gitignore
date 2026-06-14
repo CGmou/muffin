@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.muffin/
+*.db
+.smoke*/
+.smoke*.log
+.btest/
+*.blend
+mockout/
+.venv/
+venv/
+*.egg-info/

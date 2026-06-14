@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python --version)",
+      "PowerShell(pip install -q -r requirements.txt 2>&1)"
+    ]
+  }
+}

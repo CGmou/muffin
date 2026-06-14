@@ -1,0 +1,31 @@
+# Muffin Manager on Synology (Container Manager ▸ Project) or any Docker host.
+#
+# Synology quick start:
+#   1. Copy the whole muffin repo to the NAS, e.g. /volume1/docker/muffin
+#   2. Container Manager ▸ Project ▸ Create
+#        - Project name: muffin
+#        - Path: /volume1/docker/muffin/deploy
+#        - Source: use this docker-compose.yml
+#   3. Build & run. The manager is at  http://<nas-ip>:8080
+#   4. Point every Worker / Monitor / submitter at that URL.
+services:
+  muffin-manager:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: muffin-manager
+    ports:
+      - "8080:8080"
+    volumes:
+      # SQLite database + farm state — survives container updates.
+      - ./data:/data
+    environment:
+      - MUFFIN_WORKER_TIMEOUT=30
+      - MUFFIN_MAX_ATTEMPTS=3
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/jobs', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
