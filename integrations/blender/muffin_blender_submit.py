@@ -30,6 +30,17 @@ bl_info = {
     "category": "Render",
 }
 
+# Named priority levels (keep in sync with muffin/priority.py + the Maya add-on).
+# EnumProperty stores the identifier; we map it to the manager's numeric priority.
+_PRIORITY_ITEMS = [
+    ("LOW", "Low", "Lowest priority"),
+    ("BELOW", "Below Normal", "Below normal priority"),
+    ("NORMAL", "Normal", "Normal priority"),
+    ("HIGH", "High", "High priority"),
+    ("URGENT", "Urgent", "Highest priority — runs first"),
+]
+_PRIORITY_VALUES = {"LOW": 10, "BELOW": 30, "NORMAL": 50, "HIGH": 70, "URGENT": 90}
+
 
 def _prefs():
     """The add-on's preferences (where the Manager URL is configured)."""
@@ -59,7 +70,7 @@ def _submit_payload(scene) -> dict:
         "frame_end": scene.frame_end,
         "frame_step": scene.frame_step,
         "chunk_size": max(1, scene.muffin_chunk_size),
-        "priority": scene.muffin_priority,
+        "priority": _PRIORITY_VALUES.get(scene.muffin_priority, 50),
         "extra": {},
         "submitter": _submitter(),
     }
@@ -317,8 +328,9 @@ def _register_props():
         description="Defaults to the .blend file name; edit to rename")
     bpy.types.Scene.muffin_chunk_size = bpy.props.IntProperty(
         name="Frames / task", default=5, min=1, soft_max=50)
-    bpy.types.Scene.muffin_priority = bpy.props.IntProperty(
-        name="Priority", default=50, min=0, soft_max=100)
+    bpy.types.Scene.muffin_priority = bpy.props.EnumProperty(
+        name="Priority", items=_PRIORITY_ITEMS, default="NORMAL",
+        description="How urgently the farm should run this job")
     bpy.types.Scene.muffin_layers = bpy.props.EnumProperty(
         name="Submit",
         items=[

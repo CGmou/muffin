@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import settings
+from .. import priority, settings
 from .notify import Notifier
 from .style import QSS, app_icon, apply_app_icon
 
@@ -171,8 +171,10 @@ def _section_min(h, i: int) -> int:
 
 
 def _fit_apply(widget) -> None:
-    if not getattr(widget, "_fit_enabled", True):
-        return  # "push" mode: columns keep their widths, scrollbar handles overflow
+    """Distribute the viewport width across the visible columns once (see the
+    water-fill below). This is a deliberate, one-shot 'fill the window' — it is
+    NOT run on every window resize, so a column you've sized stays put (like a
+    spreadsheet); call it again via Layout ▸ Fit columns to window."""
     h = widget._fit_header()
     visible = [i for i in range(h.count()) if not h.isSectionHidden(i)]
     avail = widget.viewport().width()
@@ -185,10 +187,15 @@ def _fit_apply(widget) -> None:
         weights = {i: max(1, h.sectionSize(i)) for i in visible}
         widget._fit_weights = weights
     mins = {i: _section_min(h, i) for i in visible}
+    # If even the header-width minima don't all fit, don't squeeze everything to
+    # the title width — leave the columns at their current (comfortable) widths
+    # and let the horizontal scrollbar show. Filling only makes sense when the
+    # window is genuinely wide enough.
+    if sum(mins.values()) > avail:
+        return
     # Water-fill: share the width by weight, but pin any column whose weighted
     # share would fall under its header minimum and re-share the rest among the
-    # others. If the minima don't fit, columns sit at their minima and the table
-    # overflows (the horizontal scrollbar appears) rather than squeezing titles.
+    # others.
     free = list(visible)
     assigned: dict[int, int] = {}
     remaining = avail
@@ -217,14 +224,27 @@ def _fit_apply(widget) -> None:
     widget._fitting = False
 
 
+def _apply_default_widths(view, widths) -> None:
+    """Set sensible starting column widths — never narrower than the header label
+    so titles read at the default — without tripping the user-resize handler."""
+    h = view._fit_header()
+    h.blockSignals(True)
+    for i, w in enumerate(widths):
+        if i < h.count():
+            h.resizeSection(i, max(w, _section_min(h, i)))
+    h.blockSignals(False)
+
+
 def _fit_on_user_resize(widget) -> None:
-    # A real (user) column drag re-seeds the weights so the new proportions
-    # stick across future window resizes.
+    # A real (user) column drag re-seeds the weights (so a later 'Fit columns to
+    # window' keeps the new proportions) and cancels any pending initial fit —
+    # once you've sized a column, we never auto-resize the columns again.
     if getattr(widget, "_fitting", False) or getattr(widget, "_fit_restoring", False):
         return
     h = widget._fit_header()
     widget._fit_weights = {i: max(1, h.sectionSize(i))
                            for i in range(h.count()) if not h.isSectionHidden(i)}
+    widget._fit_pending = False
 
 
 class FitTableWidget(QTableWidget):
@@ -234,7 +254,7 @@ class FitTableWidget(QTableWidget):
         super().__init__(*a, **k)
         self._fit_weights = None
         self._fitting = False
-        self._fit_enabled = True
+        self._fit_pending = True   # fill the window once, on the first real resize
         self.horizontalHeader().sectionResized.connect(
             lambda *_: _fit_on_user_resize(self))
 
@@ -243,7 +263,11 @@ class FitTableWidget(QTableWidget):
 
     def resizeEvent(self, ev) -> None:
         super().resizeEvent(ev)
-        _fit_apply(self)
+        # Fit ONLY the first time the widget gets a real width — after that the
+        # columns are manual, so resizing the window never disturbs them.
+        if self._fit_pending and self.viewport().width() > 60:
+            _fit_apply(self)
+            self._fit_pending = False
 
     def fit_columns(self) -> None:
         _fit_apply(self)
@@ -268,7 +292,7 @@ class FitTreeWidget(QTreeWidget):
         super().__init__(*a, **k)
         self._fit_weights = None
         self._fitting = False
-        self._fit_enabled = True
+        self._fit_pending = True   # fill the window once, on the first real resize
         self.header().sectionResized.connect(lambda *_: _fit_on_user_resize(self))
 
     def _fit_header(self):
@@ -276,7 +300,9 @@ class FitTreeWidget(QTreeWidget):
 
     def resizeEvent(self, ev) -> None:
         super().resizeEvent(ev)
-        _fit_apply(self)
+        if self._fit_pending and self.viewport().width() > 60:
+            _fit_apply(self)
+            self._fit_pending = False
 
     def fit_columns(self) -> None:
         _fit_apply(self)
@@ -361,9 +387,9 @@ class JobEditDialog(QDialog):
         form = QFormLayout(self)
 
         self.name = QLineEdit(job["name"])
-        self.priority = QSpinBox()
-        self.priority.setRange(0, 1000)
-        self.priority.setValue(job["priority"])
+        self.priority = QComboBox()
+        self.priority.addItems(priority.LABELS)
+        self.priority.setCurrentText(priority.label_for(job.get("priority", 50)))
         form.addRow("Name", self.name)
         form.addRow("Priority", self.priority)
 
@@ -405,9 +431,10 @@ class JobEditDialog(QDialog):
         return s
 
     def payload(self) -> dict:
+        prio = priority.value_for(self.priority.currentText())
         if self.group:
-            return {"priority": self.priority.value()}
-        data = {"name": self.name.text().strip(), "priority": self.priority.value()}
+            return {"priority": prio}
+        data = {"name": self.name.text().strip(), "priority": prio}
         if not self.started:
             data.update(frame_start=self.f_start.value(), frame_end=self.f_end.value(),
                         chunk_size=self.chunk.value())
@@ -772,6 +799,8 @@ class CompactColumnsDialog(QDialog):
 JOB_HEADERS = ["Job Name", "DCC", "Renderer", "Frames", "Progress", "Job ID",
                "Priority", "Submitter", "Worker", "Submit Time", "Start Time",
                "Job Done Time", "Render Time", "Status"]
+# Comfortable starting widths (clamped up to each header's width at build time).
+JOB_COL_WIDTHS = [200, 60, 90, 90, 140, 110, 100, 120, 110, 140, 140, 140, 110, 90]
 
 
 class MonitorWidget(QWidget):
@@ -831,7 +860,7 @@ class MonitorWidget(QWidget):
         h.setSectionsMovable(True)
         h.setStretchLastSection(False)
         h.setCascadingSectionResizes(False)
-        t.setColumnWidth(0, 200)
+        _apply_default_widths(t, JOB_COL_WIDTHS)
         t.setSortingEnabled(True)
         h.setSortIndicator(-1, Qt.AscendingOrder)
         t.setItemDelegateForColumn(4, ProgressDelegate(t))
@@ -875,6 +904,17 @@ class MonitorWidget(QWidget):
         fmenu.addAction(clear_act)
         self.filter_btn.setMenu(fmenu)
         head.addWidget(self.filter_btn)
+        head.addSpacing(8)
+        collapse_btn = QToolButton()
+        collapse_btn.setText("⊟ Collapse all")
+        collapse_btn.setToolTip("Collapse every multi-job submission")
+        collapse_btn.clicked.connect(self._collapse_all_jobs)
+        head.addWidget(collapse_btn)
+        expand_btn = QToolButton()
+        expand_btn.setText("⊞ Expand all")
+        expand_btn.setToolTip("Expand every multi-job submission")
+        expand_btn.clicked.connect(self._expand_all_jobs)
+        head.addWidget(expand_btn)
         head.addStretch()
         search = QLineEdit()
         search.setPlaceholderText("Search jobs…")
@@ -892,7 +932,8 @@ class MonitorWidget(QWidget):
 
         self.tasks_table = self._table(
             ["Task Name", "Task ID", "Frames", "Progress", "Status", "Priority",
-             "Worker", "Start Time", "End Time", "Render Time"])
+             "Worker", "Start Time", "End Time", "Render Time"],
+            [160, 110, 90, 140, 90, 100, 110, 150, 150, 110])
         self.tasks_table.setItemDelegateForColumn(3, ProgressDelegate(self.tasks_table))
         self.tasks_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tasks_table.customContextMenuRequested.connect(self._tasks_menu)
@@ -908,7 +949,8 @@ class MonitorWidget(QWidget):
 
         self.workers_table = self._table(
             ["Name", "Pool", "Status", "Current Job", "Task ID", "Last Job",
-             "CPU", "GPU", "RAM", "Last active"])
+             "CPU", "GPU", "RAM", "Last active"],
+            [150, 90, 90, 150, 110, 150, 120, 120, 90, 150])
         self.workers_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.workers_table.customContextMenuRequested.connect(self._worker_menu)
         self.split.addWidget(self._titled("Workers", self.workers_table, searchable=True))
@@ -937,7 +979,7 @@ class MonitorWidget(QWidget):
         lay.addWidget(view)
         return w
 
-    def _table(self, headers: list[str]) -> QTableWidget:
+    def _table(self, headers: list[str], widths: list[int] = None) -> QTableWidget:
         t = FitTableWidget(0, len(headers))
         t.setHorizontalHeaderLabels(headers)
         t.verticalHeader().setVisible(False)
@@ -950,7 +992,7 @@ class MonitorWidget(QWidget):
         h.setStretchLastSection(False)
         h.setCascadingSectionResizes(False)
         t.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        t.setColumnWidth(0, 160)
+        _apply_default_widths(t, widths or [160] + [100] * (len(headers) - 1))
         t.setSortingEnabled(True)
         h.setSortIndicator(-1, Qt.AscendingOrder)
         return t
@@ -1070,7 +1112,7 @@ class MonitorWidget(QWidget):
             3: f"{j['frame_start']}–{j['frame_end']}",
             4: "",
             5: j["id"].split("::")[-1] if is_batch else j["id"],
-            6: str(j.get("priority", 0)),
+            6: priority.label_for(j.get("priority", 0)),
             7: submitter or "—",
             8: worker_disp,
             9: _fmt_time(j.get("created_at")),
@@ -1150,6 +1192,24 @@ class MonitorWidget(QWidget):
             for k in range(top.childCount()):
                 yield top.child(k)
 
+    def _collapse_all_jobs(self) -> None:
+        """Collapse every multi-job (batch) row, and remember it so refreshes
+        keep them collapsed."""
+        t = self.jobs_table
+        for i in range(t.topLevelItemCount()):
+            top = t.topLevelItem(i)
+            if top.childCount():
+                self._collapsed.add(top.data(0, Qt.UserRole))
+        t.collapseAll()
+
+    def _expand_all_jobs(self) -> None:
+        t = self.jobs_table
+        for i in range(t.topLevelItemCount()):
+            top = t.topLevelItem(i)
+            if top.childCount():
+                self._collapsed.discard(top.data(0, Qt.UserRole))
+        t.expandAll()
+
     def _selected_job_id(self):
         items = self.jobs_table.selectedItems()
         return items[0].data(0, Qt.UserRole) if items else None
@@ -1189,7 +1249,6 @@ class MonitorWidget(QWidget):
         if not detail or detail.get("id") != self._detail_id:
             return
         self.tasks_label.setText(f"Tasks — {detail['name']}")
-        self._detail_output = detail.get("output_path", "")
         tasks = detail.get("tasks", [])
         t.setUpdatesEnabled(False)
         t.setSortingEnabled(False)
@@ -1207,8 +1266,7 @@ class MonitorWidget(QWidget):
             prog.setData(Qt.UserRole + 1, hex_color)
             prog.setData(Qt.EditRole, pct)
             worker = self._worker_names.get(task.get("worker_id"), task.get("worker_id") or "—")
-            prio = QTableWidgetItem()
-            prio.setData(Qt.DisplayRole, int(detail.get("priority", 0)))
+            prio = QTableWidgetItem(priority.label_for(detail.get("priority", 0)))
             cells = [
                 QTableWidgetItem(job_name),
                 QTableWidgetItem(task["id"]),
@@ -1294,12 +1352,8 @@ class MonitorWidget(QWidget):
             self._empty_space_menu(self.tasks_table, pos)
             return
         menu = QMenu(self)
-        a_preview = menu.addAction("🎬 Preview (DJV)")
         a_refresh = menu.addAction("⟳ Refresh")
-        chosen = menu.exec(self.tasks_table.viewport().mapToGlobal(pos))
-        if chosen == a_preview:
-            self._preview(getattr(self, "_detail_output", ""))
-        elif chosen == a_refresh:
+        if menu.exec(self.tasks_table.viewport().mapToGlobal(pos)) == a_refresh:
             self.force_refresh()
 
     def _job_menu(self, pos) -> None:
@@ -1332,7 +1386,6 @@ class MonitorWidget(QWidget):
         a_log.setEnabled(len(sel_items) == 1)
         menu.addSeparator()
         a_open = menu.addAction("📂 Open Render Output")
-        a_preview = menu.addAction("🎬 Preview (DJV)")
         menu.addSeparator()
         suffix = f"  ({len(targets)} jobs)" if multi else ""
         a_start = menu.addAction("▶ Start" + suffix)
@@ -1356,8 +1409,6 @@ class MonitorWidget(QWidget):
             self._show_job_log_by_id(item.data(0, Qt.UserRole))
         elif chosen == a_open:
             self._open_output(item.data(0, Qt.UserRole + 1), targets[0])
-        elif chosen == a_preview:
-            self._preview(item.data(0, Qt.UserRole + 1))
         elif chosen == a_pause:
             for jid in targets:
                 self._req("post", f"/api/jobs/{jid}/pause")
@@ -1507,58 +1558,6 @@ class MonitorWidget(QWidget):
                 pass
         self._req("post", f"/api/jobs/{job_id}/reveal", show_err=True)
 
-    # ------------------------------------------------------------ preview ----
-    def _preview(self, output_path: str) -> None:
-        """Open the rendered frames in DJV (external review player)."""
-        import os
-        import subprocess
-
-        s = settings.load()
-        djv = s.get("dcc_paths", {}).get("djv", "")
-        if not djv or not os.path.isfile(djv):
-            from PySide6.QtWidgets import QFileDialog
-            djv, _ = QFileDialog.getOpenFileName(
-                self, "Locate the DJV player (djv.exe)", "", "Programs (*.exe)")
-            if not djv:
-                return
-            s.setdefault("dcc_paths", {})["djv"] = djv
-            settings.save(s)
-
-        target = self._resolve_preview_target(output_path)
-        if not target:
-            QMessageBox.information(
-                self, "Preview",
-                "No rendered frames found at the job's output path yet.")
-            return
-        try:
-            subprocess.Popen([djv, target])
-        except OSError as exc:
-            QMessageBox.warning(self, "Preview", f"Could not start DJV: {exc}")
-
-    @staticmethod
-    def _resolve_preview_target(output_path: str):
-        """Best frame to hand DJV: first file of the rendered sequence."""
-        import glob
-        import os
-        import re
-
-        if not output_path:
-            return None
-        d = output_path if os.path.isdir(output_path) else os.path.dirname(output_path)
-        base = os.path.basename(output_path) if not os.path.isdir(output_path) else ""
-        if base and "#" in base:
-            pattern = re.sub(r"#+", "*", base)
-            matches = sorted(glob.glob(os.path.join(d, pattern)) +
-                             glob.glob(os.path.join(d, pattern + ".*")))
-            if matches:
-                return matches[0]
-        if os.path.isdir(d):
-            exts = (".png", ".jpg", ".jpeg", ".exr", ".tif", ".tiff", ".dpx", ".mp4", ".mov")
-            frames = sorted(f for f in os.listdir(d) if f.lower().endswith(exts))
-            if frames:
-                return os.path.join(d, frames[0])
-        return None
-
     # --------------------------------------------------------------- net ----
     def _base(self) -> str:
         return (self.manager_url or "http://127.0.0.1:8080").rstrip("/")
@@ -1626,14 +1625,12 @@ class MonitorWindow(QMainWindow):
         reset_lay.triggered.connect(self._reset_layout)
         lm.addAction(reset_lay)
         lm.addSeparator()
-        # Auto-fit ON (default): columns always fill the window. OFF: columns
-        # keep their widths and a horizontal scrollbar appears, so dragging one
-        # column pushes the others instead of squeezing the whole list.
-        self.autofit_act = QAction("Auto-fit columns to window", self)
-        self.autofit_act.setCheckable(True)
-        self.autofit_act.setChecked(True)
-        self.autofit_act.toggled.connect(self._set_autofit)
-        lm.addAction(self.autofit_act)
+        # Columns are manual (spreadsheet-style): resizing one pushes the rest
+        # and a horizontal scrollbar appears when needed; the window resizing
+        # never disturbs them. This fills them to the window on demand.
+        fit_act = QAction("Fit columns to window", self)
+        fit_act.triggered.connect(self._fit_columns_now)
+        lm.addAction(fit_act)
 
         # Notifications menu — toast when a job finishes / fails.
         nm = self.menuBar().addMenu("Notifications")
@@ -1678,10 +1675,6 @@ class MonitorWindow(QMainWindow):
         # Compact mode is applied after the layout so it wins over saved state.
         if settings.load().get("monitor_compact"):
             self.compact_act.setChecked(True)
-        # Auto-fit is the default; only flip it if the user turned it off (this
-        # fires _set_autofit, which switches on the scrollbars + stops fitting).
-        if not settings.load().get("monitor_autofit", True):
-            self.autofit_act.setChecked(False)
 
     # Default compact columns: Job Name, Frames, Progress, Status.
     _COMPACT_DEFAULT = [0, 3, 4, 13]
@@ -1820,28 +1813,25 @@ class MonitorWindow(QMainWindow):
         return (self.view.jobs_table, self.view.tasks_table, self.view.workers_table)
 
     def _reseed_fit(self, table) -> None:
-        """Make the table's CURRENT column widths the fit baseline (proportions),
-        then fit them to the viewport. Used after restoring a layout so the
-        saved widths become what every future resize fits to."""
-        if not getattr(table, "_fit_enabled", True):
-            return  # push mode: nothing to fit; weights re-seed when fit resumes
+        """Seed the fit weights from the table's CURRENT widths, then fill the
+        window once — immediately if the table is on-screen, otherwise on its
+        first real resize (startup). Used after compact-mode changes / Reset
+        Layout; afterwards the columns are manual again."""
         h = table.horizontalHeader()
         table._fit_weights = {i: max(1, h.sectionSize(i))
                               for i in range(h.count()) if not h.isSectionHidden(i)}
-        table.fit_columns()
+        if table.isVisible() and table.viewport().width() > 60:
+            table.fit_columns()
+            table._fit_pending = False
+        else:
+            table._fit_pending = True   # defer until the first real resize
 
-    def _set_autofit(self, on: bool) -> None:
-        """Toggle 'columns fill the window' (always honouring each column's
-        header-width minimum). OFF leaves columns at whatever widths they have,
-        so the view is fully manual; the horizontal scrollbar is available in
-        both modes so a too-wide layout pushes rather than squeezes."""
+    def _fit_columns_now(self) -> None:
+        """One-shot: distribute the columns to fill the window right now (each
+        column still kept at least as wide as its header). Columns stay manual
+        afterwards — this is the spreadsheet-style 'fit to window' command."""
         for t in self._tables():
-            t._fit_enabled = on
-            if on:
-                self._reseed_fit(t)  # snap back to filling the window
-        s = settings.load()
-        s["monitor_autofit"] = on
-        settings.save(s)
+            t.fit_columns()
 
     def _restore_layout(self) -> None:
         lay = settings.load().get("monitor_layout") or {}
@@ -1869,9 +1859,15 @@ class MonitorWindow(QMainWindow):
         # Default order = newest job on top: never restore a sort on the jobs
         # list (the user can still click a header to sort during the session).
         self.view.jobs_table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
-        # The saved (or factory) widths become the always-fit baseline.
+        # With a saved layout, keep its exact column widths (manual, no auto-fit).
+        # Without one, fill the window once on first show. Either way, seed the
+        # fit weights so a later Fit-columns keeps the current proportions.
+        has_saved = bool(lay)
         for t in self._tables():
-            self._reseed_fit(t)
+            h = t.horizontalHeader()
+            t._fit_weights = {i: max(1, h.sectionSize(i))
+                              for i in range(h.count()) if not h.isSectionHidden(i)}
+            t._fit_pending = not has_saved
 
     def _save_layout(self) -> None:
         s = settings.load()

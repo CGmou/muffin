@@ -89,6 +89,9 @@ class TaskRunner:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                # Most plugins return None (inherit); kick adds Maya bin/plugins
+                # to PATH so it can load Arnold's shaders.
+                env=self._plugin.build_env(self.assignment),
             )
         except FileNotFoundError:
             return "failed", -1, f"[muffin] executable not found: {cmd[0]}\n"

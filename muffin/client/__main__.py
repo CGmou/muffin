@@ -6,10 +6,6 @@ Examples:
       --scene //server/proj/shotA.blend --output //server/proj/out/sh_ \
       --start 1 --end 100 --chunk 5 --priority 60
 
-  # Submit a fake job to test the farm end-to-end (no DCC needed)
-  python -m muffin.client submit --name smoke --dcc mock --scene none \
-      --output ./mockout --start 1 --end 20
-
   python -m muffin.client jobs
   python -m muffin.client job <job_id>
   python -m muffin.client workers
@@ -89,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("submit", help="submit a render job")
     s.add_argument("--name", required=True)
-    s.add_argument("--dcc", required=True, help="blender|maya|houdini|nuke|mock")
+    s.add_argument("--dcc", required=True, help="blender|maya|houdini|kick")
     s.add_argument("--renderer", default="")
     s.add_argument("--scene", required=True)
     s.add_argument("--output", default="")

@@ -18,7 +18,10 @@ DEFAULTS: dict[str, Any] = {
     "manager_url": config.MANAGER_URL,
     "worker_name": "",          # blank = use hostname
     "capabilities": [],         # blank list = accept every DCC (the common case)
-    "dcc_paths": {},            # {"blender": "C:/.../blender.exe", "hython": "..."}
+    "dcc_paths": {},            # {"blender": "C:/.../blender.exe", "kick": "..."}
+    # Extra folders the kick (.ass) renderer needs on this worker — Maya's bin
+    # and XGen plug-in dir go on PATH, procedurals is kick's -l search path.
+    "kick": {"maya_bin": "", "xgen": "", "procedurals": ""},
     # GUI conveniences (read by the desktop apps; ignored by headless workers).
     "worker_autostart": True,   # Worker app starts rendering as soon as it opens
     "manager_autostart": True,  # Node app starts the manager as soon as it opens

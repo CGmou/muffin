@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 # ---- Job submission ----
 class JobSubmit(BaseModel):
     name: str = Field(..., description="Display name for the job")
-    dcc: str = Field(..., description="DCC plugin name, e.g. blender / maya / mock")
+    dcc: str = Field(..., description="DCC plugin name, e.g. blender / maya / kick")
     renderer: str = Field("", description="Renderer override, e.g. CYCLES / arnold")
     scene_path: str = Field(..., description="Path to the scene file on the workers")
     output_path: str = Field("", description="Output directory / file pattern")

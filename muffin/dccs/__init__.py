@@ -6,12 +6,11 @@ from typing import Optional
 from .base import DCC
 from .blender import BlenderDCC
 from .houdini import HoudiniDCC
+from .kick import KickDCC
 from .maya import MayaDCC
-from .mock import MockDCC
-from .nuke import NukeDCC
 
 _REGISTRY: dict[str, DCC] = {
-    p.name: p for p in (MockDCC(), BlenderDCC(), MayaDCC(), HoudiniDCC(), NukeDCC())
+    p.name: p for p in (BlenderDCC(), MayaDCC(), HoudiniDCC(), KickDCC())
 }
 
 

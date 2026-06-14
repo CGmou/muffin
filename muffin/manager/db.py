@@ -172,6 +172,10 @@ def _create_tasks_for_job(job_id: str, data: dict[str, Any]) -> None:
     end = data["frame_end"]
     step = max(1, data.get("frame_step", 1))
     chunk = max(1, data.get("chunk_size", 1))
+    # kick renders exactly one .ass file per invocation, so a kick job is always
+    # one frame per task — never let an edited chunk_size silently drop frames.
+    if str(data.get("dcc", "")).lower() == "kick":
+        chunk = 1
     frames = list(range(start, end + 1, step))
     for i in range(0, len(frames), chunk):
         block = frames[i:i + chunk]

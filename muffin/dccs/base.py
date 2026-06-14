@@ -32,6 +32,12 @@ class DCC:
         """Given one line of stdout, return a 0..1 progress estimate, or None."""
         return None
 
+    def build_env(self, task: dict[str, Any]) -> Optional[dict]:
+        """Environment for the render subprocess, or None to inherit the
+        worker's unchanged. Most DCCs inherit; kick prepends Maya bin/plugins
+        to PATH so it can find Arnold's libraries."""
+        return None
+
     def exe(self) -> str:
         """The executable to launch. Resolution order: env override
         MUFFIN_<NAME>_EXE  >  the GUI settings file  >  the bare name on PATH.

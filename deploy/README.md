@@ -47,10 +47,9 @@ Give the NAS a **static IP** (or DNS name) so the URL never changes.
   Project ▸ Build again. The `data/` volume keeps all jobs/workers.
 - **Port**: change the left side of `8080:8080` in the compose file if 8080
   is taken on the NAS.
-- The "Open Render Output" / "Preview (DJV)" actions in the Monitor open
-  paths on *your* machine, so they keep working with a NAS-hosted manager as
-  long as the job's output path is reachable from your PC (e.g. a `\\nas\…`
-  share or mapped drive).
+- The "Open Render Output" action in the Monitor opens paths on *your* machine,
+  so it keeps working with a NAS-hosted manager as long as the job's output path
+  is reachable from your PC (e.g. a `\\nas\…` share or mapped drive).
 
 ## Without Docker (not recommended)
 DSM ships Python 3; you can run the manager directly via Task Scheduler

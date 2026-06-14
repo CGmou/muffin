@@ -6,7 +6,6 @@ __pycache__/
 .smoke*.log
 .btest/
 *.blend
-mockout/
 .venv/
 venv/
 *.egg-info/
