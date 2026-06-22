@@ -30,7 +30,8 @@ farm without holding a Maya licence.
   the farm. (Houdini renders today via the CLI/API; an in-app Houdini submitter is in
   development.)
 - **Farm features** — frame chunking, named priorities (Low → Urgent), pools, automatic
-  retries, and dead-worker detection (a crashed worker's task is requeued).
+  retries, dead-worker detection (a crashed worker's task is requeued), and per-worker
+  **render schedules** so a machine only renders out of office hours (see below).
 
 ## Install
 ```powershell
@@ -83,6 +84,35 @@ $env:MUFFIN_MANAGER_URL = "http://192.168.1.10:8080"
 $env:MUFFIN_BLENDER_EXE = "C:\Program Files\Blender Foundation\Blender 5.1\blender.exe"
 python -m muffin.worker
 ```
+
+## Worker schedules (render only out of office hours)
+An artist's PC can double as a render node **after hours** without ever stealing the
+machine during the day. Each worker can carry a weekly schedule of *render-allowed*
+hours; outside them the worker is on **standby** — it isn't given new frames, and any
+render already running is stopped and requeued so the PC is free the moment work starts.
+
+**Set the whole farm at once — Muffin's Monitor ▸ Schedule ▸ Worker Schedules…:**
+1. **Tick the workers** to schedule (all are ticked by default; **All** / **None** buttons help).
+2. Set the week once, to the **minute**, with the editor:
+   - tick **Enable schedule**, then pick a preset — **Nights & weekends** (renders
+     18:00–09:00 on weekdays + all weekend), **Render 24/7**, or **Off (never)**; or
+   - **Quick set** — type a window like *18:30 → 09:15*, tick the days, **Apply**; or
+   - set any day to **Off / All day / Window** (a window that ends earlier than it
+     starts is shown as **(next day)**, e.g. 18:00 → 09:00).
+   A plain-English line ("Mon–Fri 18:00–09:00 next day · Sat–Sun all day") previews it.
+3. **Save** — the schedule is applied to every ticked worker.
+
+**Artists can set their own machine** without opening the Monitor: in the **Muffin
+(Worker) app ▸ Settings ▸ Render schedule…**. It edits the same schedule on the manager,
+found by this machine's name, so the Monitor stays in sync.
+
+A parked node shows as **scheduled off** in the Workers list. A frame stopped for the
+schedule is **requeued without a failure** — a night-shift machine simply picks it up
+later.
+
+> **Timezones just work.** Each worker reports its own UTC offset, so "09:00" means
+> 9am *where that machine sits* — even when the manager runs on a NAS in another
+> timezone. No clock config needed.
 
 ## Configuration
 Everything is overridable via environment variables (most are also editable in the GUIs):

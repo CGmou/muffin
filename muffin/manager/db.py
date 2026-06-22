@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from .. import config
+from .. import config, schedule as schedule_mod
 
 # One connection guarded by a lock. The manager is I/O light (a small studio /
 # LAN farm), so a single serialized connection is plenty and avoids "database is
@@ -72,7 +72,10 @@ CREATE TABLE IF NOT EXISTS workers (
     ram             TEXT NOT NULL DEFAULT '',
     last_seen       REAL NOT NULL,
     registered_at   REAL NOT NULL,
-    enabled         INTEGER NOT NULL DEFAULT 1
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    tz_offset        INTEGER,
+    schedule_enabled INTEGER NOT NULL DEFAULT 0,
+    schedule         TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS pools (
@@ -115,6 +118,12 @@ def _migrate() -> None:
         for row in _conn.execute("SELECT id, pool FROM workers WHERE pool != ''").fetchall():
             _conn.execute("UPDATE workers SET pools=? WHERE id=?",
                           (json.dumps([row["pool"]]), row["id"]))
+    if "schedule" not in cols:
+        # Per-worker render schedule (see muffin/schedule.py). tz_offset lets the
+        # manager evaluate the schedule in the worker's own local time.
+        _conn.execute("ALTER TABLE workers ADD COLUMN tz_offset INTEGER")
+        _conn.execute("ALTER TABLE workers ADD COLUMN schedule_enabled INTEGER NOT NULL DEFAULT 0")
+        _conn.execute("ALTER TABLE workers ADD COLUMN schedule TEXT NOT NULL DEFAULT ''")
     jcols = [r[1] for r in _conn.execute("PRAGMA table_info(jobs)").fetchall()]
     if "submitter" not in jcols:
         _conn.execute("ALTER TABLE jobs ADD COLUMN submitter TEXT NOT NULL DEFAULT ''")
@@ -400,21 +409,21 @@ def upsert_worker(data: dict[str, Any]) -> dict[str, Any]:
             wid = existing["id"]
             _conn.execute(
                 """UPDATE workers SET host=?, capabilities=?, status='idle',
-                       cpu=?, gpu=?, ram=?, last_seen=? WHERE id=?""",
+                       cpu=?, gpu=?, ram=?, tz_offset=?, last_seen=? WHERE id=?""",
                 (data.get("host", ""), json.dumps(data.get("capabilities", [])),
                  data.get("cpu", ""), data.get("gpu", ""), data.get("ram", ""),
-                 now, wid),
+                 data.get("tz_offset"), now, wid),
             )
         else:
             wid = new_id()
             _conn.execute(
                 """INSERT INTO workers (id, name, host, status, capabilities,
-                       cpu, gpu, ram, last_seen, registered_at)
-                   VALUES (?,?,?,'idle',?,?,?,?,?,?)""",
+                       cpu, gpu, ram, tz_offset, last_seen, registered_at)
+                   VALUES (?,?,?,'idle',?,?,?,?,?,?,?)""",
                 (wid, data["name"], data.get("host", ""),
                  json.dumps(data.get("capabilities", [])),
                  data.get("cpu", ""), data.get("gpu", ""), data.get("ram", ""),
-                 now, now),
+                 data.get("tz_offset"), now, now),
             )
         _conn.commit()
     return get_worker(wid)
@@ -424,6 +433,19 @@ def _worker_dict(row) -> dict[str, Any]:
     d = _row_to_dict(row, ("capabilities", "pools"))
     # "pool" stays as the display string; "pools" is the real membership list.
     d["pool"] = ", ".join(d.get("pools") or [])
+    # Decode the render schedule (stored as a JSON list of 7 hour-bitmasks) and
+    # surface live derived fields the UIs need: a normalized grid, the enabled
+    # flag as a bool, and whether the worker is right now OUTSIDE its window.
+    raw = d.get("schedule")
+    grid = None
+    if isinstance(raw, str) and raw.strip():
+        try:
+            grid = json.loads(raw)
+        except json.JSONDecodeError:
+            grid = None
+    d["schedule"] = schedule_mod.normalize(grid) if grid is not None else None
+    d["schedule_enabled"] = bool(d.get("schedule_enabled"))
+    d["standby"] = schedule_mod.worker_standby(d)
     return d
 
 
@@ -445,12 +467,21 @@ def list_workers() -> list[dict[str, Any]]:
     return [_worker_dict(r) for r in rows]
 
 
-def heartbeat_worker(worker_id: str, status: str, current_task_id: Optional[str]) -> None:
+def heartbeat_worker(worker_id: str, status: str, current_task_id: Optional[str],
+                     tz_offset: Optional[int] = None) -> None:
     with _lock:
-        _conn.execute(
-            "UPDATE workers SET last_seen=?, status=?, current_task_id=? WHERE id=?",
-            (time.time(), status, current_task_id, worker_id),
-        )
+        if tz_offset is None:
+            _conn.execute(
+                "UPDATE workers SET last_seen=?, status=?, current_task_id=? WHERE id=?",
+                (time.time(), status, current_task_id, worker_id),
+            )
+        else:
+            # Refresh the worker's UTC offset on every beat so a DST change is
+            # picked up without waiting for a re-registration.
+            _conn.execute(
+                "UPDATE workers SET last_seen=?, status=?, current_task_id=?, tz_offset=? WHERE id=?",
+                (time.time(), status, current_task_id, tz_offset, worker_id),
+            )
         _conn.commit()
 
 
@@ -465,6 +496,14 @@ def update_worker(worker_id: str, fields: dict[str, Any]) -> None:
     if "pool" in fields:
         sets.append("pool=?")
         vals.append(fields["pool"])
+    if "schedule_enabled" in fields:
+        sets.append("schedule_enabled=?")
+        vals.append(1 if fields["schedule_enabled"] else 0)
+    if "schedule" in fields:
+        # Stored as a compact JSON list of 7 hour-bitmasks (see muffin/schedule).
+        grid = schedule_mod.normalize(fields["schedule"])
+        sets.append("schedule=?")
+        vals.append(json.dumps(grid))
     if not sets:
         return
     vals.append(worker_id)

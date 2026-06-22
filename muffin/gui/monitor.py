@@ -25,8 +25,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import priority, settings
+from .. import priority, schedule, settings
 from .notify import Notifier
+from .schedule_widget import ScheduleEditor
 from .style import QSS, app_icon, apply_app_icon
 
 # Row text color per job status.
@@ -48,6 +49,8 @@ def _worker_row_color(w: dict) -> str:
         return "#8a91a0"          # grey
     if not w.get("enabled", 1):
         return "#e8a13a"          # orange
+    if w.get("standby") and w.get("status") != "busy":
+        return "#e8a13a"          # orange — parked by its schedule (work hours)
     if w.get("status") == "busy":
         return "#4caf72"          # green
     return "#ffffff"              # white
@@ -480,6 +483,134 @@ class WorkerEditDialog(QDialog):
 
     def is_enabled(self) -> bool:
         return self.enabled.isChecked()
+
+
+class WorkerSchedulesDialog(QDialog):
+    """Farm-wide schedules in one place (Schedule menu). The left list holds every
+    worker; tick the ones to apply to, set the weekly windows once with the editor
+    on the right, and Save. Outside its windows a worker is parked and a render in
+    progress is stopped and requeued."""
+
+    def __init__(self, base: str, parent=None) -> None:
+        super().__init__(parent)
+        self.base = base.rstrip("/")
+        self.setWindowTitle("Worker Schedules")
+        self.resize(760, 560)
+        self._workers: list[dict] = []
+        self._build()
+        self._reload()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            "Tick the workers to schedule, set the weekly render windows once, and "
+            "Save. Outside its windows a machine is left for the artist — a render "
+            "in progress is stopped and requeued. Times are each worker's own "
+            "local time.")
+        intro.setObjectName("hdr")
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        panes = QHBoxLayout()
+        left = QVBoxLayout()
+        lbl = QLabel("Apply to workers")
+        lbl.setObjectName("hdr")
+        left.addWidget(lbl)
+        self.worker_list = QListWidget()
+        left.addWidget(self.worker_list, 1)
+        selrow = QHBoxLayout()
+        allb = QPushButton("All")
+        allb.clicked.connect(lambda: self._check_all(True))
+        noneb = QPushButton("None")
+        noneb.clicked.connect(lambda: self._check_all(False))
+        selrow.addWidget(allb)
+        selrow.addWidget(noneb)
+        selrow.addStretch()
+        left.addLayout(selrow)
+        panes.addLayout(left, 1)
+
+        self.editor = ScheduleEditor()
+        panes.addWidget(self.editor, 2)
+        root.addLayout(panes, 1)
+
+        bar = QHBoxLayout()
+        self.status = QLabel("")
+        self.status.setObjectName("hdr")
+        bar.addWidget(self.status, 1)
+        save = QPushButton("Save")
+        save.setObjectName("primary")
+        save.clicked.connect(self._save)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        bar.addWidget(save)
+        bar.addWidget(close)
+        root.addLayout(bar)
+
+    def _reload(self) -> None:
+        try:
+            self._workers = requests.get(f"{self.base}/api/workers", timeout=5).json()
+        except Exception as exc:
+            QMessageBox.warning(self, "Error", str(exc))
+            return
+        if self._workers and "standby" not in self._workers[0]:
+            QMessageBox.warning(
+                self, "Manager out of date",
+                "This manager doesn't support worker schedules.\n"
+                "Restart the Muffin Manager (or rebuild the NAS container) to "
+                "enable it.")
+            self.close()
+            return
+        self.worker_list.clear()
+        for w in self._workers:
+            it = QListWidgetItem(f"{w['name']}   ({schedule.summary(w)})")
+            it.setData(Qt.UserRole, w["id"])
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked)
+            self.worker_list.addItem(it)
+        # Seed the editor from an existing schedule if any worker has one.
+        seed = next((w for w in self._workers if w.get("schedule_enabled")), None)
+        if seed:
+            self.editor.set_schedule(True, seed.get("schedule"))
+        else:
+            self.editor.set_schedule(False, schedule.nights_and_weekends())
+        if not self._workers:
+            self.status.setText("No workers registered yet.")
+
+    def _check_all(self, on: bool) -> None:
+        for i in range(self.worker_list.count()):
+            self.worker_list.item(i).setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+    def _checked_ids(self) -> list:
+        return [self.worker_list.item(i).data(Qt.UserRole)
+                for i in range(self.worker_list.count())
+                if self.worker_list.item(i).checkState() == Qt.Checked]
+
+    def _save(self) -> None:
+        ids = self._checked_ids()
+        if not ids:
+            QMessageBox.information(self, "Schedule", "Tick at least one worker.")
+            return
+        payload = {"schedule_enabled": self.editor.get_enabled(),
+                   "schedule": self.editor.get_schedule()}
+        try:
+            for wid in ids:
+                requests.put(f"{self.base}/api/workers/{wid}",
+                             json=payload, timeout=5).raise_for_status()
+        except Exception as exc:
+            QMessageBox.warning(self, "Error", str(exc))
+            return
+        # Reflect locally so the list labels update without another round-trip.
+        idset = set(ids)
+        for w in self._workers:
+            if w["id"] in idset:
+                w["schedule_enabled"] = payload["schedule_enabled"]
+                w["schedule"] = payload["schedule"]
+        for i in range(self.worker_list.count()):
+            it = self.worker_list.item(i)
+            w = next((x for x in self._workers if x["id"] == it.data(Qt.UserRole)), None)
+            if w:
+                it.setText(f"{w['name']}   ({schedule.summary(w)})")
+        self.status.setText(f"Saved — applied to {len(ids)} worker(s).")
 
 
 class EditWorkersDialog(QDialog):
@@ -950,7 +1081,7 @@ class MonitorWidget(QWidget):
         self.workers_table = self._table(
             ["Name", "Pool", "Status", "Current Job", "Task ID", "Last Job",
              "CPU", "GPU", "RAM", "Last active"],
-            [150, 90, 90, 150, 110, 150, 120, 120, 90, 150])
+            [150, 90, 100, 150, 110, 150, 120, 120, 90, 150])
         self.workers_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.workers_table.customContextMenuRequested.connect(self._worker_menu)
         self.split.addWidget(self._titled("Workers", self.workers_table, searchable=True))
@@ -1304,11 +1435,16 @@ class MonitorWidget(QWidget):
             name.setData(Qt.UserRole, w["id"])
             name.setData(Qt.UserRole + 1, bool(w.get("enabled", 1)))
             task_id = w.get("current_task_id") or w.get("last_task_id") or "—"
+            if not w.get("enabled", 1):
+                status_text = "disabled"
+            elif w.get("standby") and w.get("status") != "busy":
+                status_text = "scheduled off"
+            else:
+                status_text = _display_status(w["status"])
             cells = [
                 name,
                 QTableWidgetItem(w.get("pool") or "—"),
-                QTableWidgetItem(_display_status(w["status"]) if w.get("enabled", 1)
-                                 else "disabled"),
+                QTableWidgetItem(status_text),
                 QTableWidgetItem(w.get("current_job_name") or "—"),
                 QTableWidgetItem(task_id),
                 QTableWidgetItem(w.get("last_job_name") or "—"),
@@ -1632,6 +1768,12 @@ class MonitorWindow(QMainWindow):
         fit_act.triggered.connect(self._fit_columns_now)
         lm.addAction(fit_act)
 
+        # Schedule menu — set when each worker is free to render (out of hours).
+        schm = self.menuBar().addMenu("Schedule")
+        sched_act = QAction("Worker Schedules…", self)
+        sched_act.triggered.connect(self._worker_schedules)
+        schm.addAction(sched_act)
+
         # Notifications menu — toast when a job finishes / fails.
         nm = self.menuBar().addMenu("Notifications")
         self.notify_act = QAction("Enable notifications", self)
@@ -1806,6 +1948,10 @@ class MonitorWindow(QMainWindow):
 
     def _add_pool(self) -> None:
         PoolDialog(self.view.manager_url, self).exec()
+        self.view.force_refresh()
+
+    def _worker_schedules(self) -> None:
+        WorkerSchedulesDialog(self.view.manager_url, self).exec()
         self.view.force_refresh()
 
     # ------------------------------------------------------- layout memory --

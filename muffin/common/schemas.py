@@ -39,6 +39,10 @@ class WorkerEdit(BaseModel):
     name: Optional[str] = None
     capabilities: Optional[list[str]] = None
     pool: Optional[str] = None
+    # Render schedule (see muffin/schedule.py): {"days": [7 day windows]} plus the
+    # on/off switch. Set from the Monitor.
+    schedule_enabled: Optional[bool] = None
+    schedule: Optional[dict] = None
 
 
 class PoolCreate(BaseModel):
@@ -57,11 +61,14 @@ class WorkerRegister(BaseModel):
     cpu: str = ""
     gpu: str = ""
     ram: str = ""
+    tz_offset: Optional[int] = Field(
+        None, description="Worker's UTC offset in minutes east, for schedule eval")
 
 
 class WorkerHeartbeat(BaseModel):
     status: str = "idle"  # idle | busy | offline
     current_task_id: Optional[str] = None
+    tz_offset: Optional[int] = None  # keeps the manager's copy fresh across DST
 
 
 class TaskProgress(BaseModel):
@@ -70,7 +77,7 @@ class TaskProgress(BaseModel):
 
 
 class TaskResult(BaseModel):
-    status: str  # done | failed
+    status: str  # done | failed | requeued (stopped for the worker's schedule)
     log: str = ""
     exit_code: Optional[int] = None
 

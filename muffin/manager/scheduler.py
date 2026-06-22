@@ -5,13 +5,18 @@ through the locked db layer."""
 import time
 from typing import Any, Optional
 
-from .. import config
+from .. import config, schedule
 from . import db
 
 
 def assign_task(worker: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Find the highest-priority queued task this worker is able to run and
     atomically assign it. Returns the task dict (with job fields merged) or None."""
+    # Respect the worker's render schedule: outside its allowed hours it's on
+    # standby and must not be handed new work (a render already in flight is
+    # stopped separately, via the heartbeat reply).
+    if schedule.worker_standby(worker):
+        return None
     caps = [c.lower() for c in worker.get("capabilities", [])]
     with db._lock:
         # Candidate tasks: queued, whose parent job is active and not paused.
@@ -83,6 +88,20 @@ def complete_task(task_id: str, status: str, log_chunk: str = "") -> None:
     if not task:
         return
     job_id = task["job_id"]
+
+    # A worker stopped mid-render because it left its schedule window (the artist
+    # needs the PC back). That's not a failure: requeue the frame untouched, with
+    # no attempt counted, so a night-shift worker picks it up later.
+    if status == "requeued":
+        with db._lock:
+            db._conn.execute(
+                """UPDATE tasks SET status='queued', worker_id=NULL, progress=0,
+                       started_at=NULL, finished_at=NULL,
+                       log=substr(log || ?, -20000) WHERE id=?""",
+                ("\n[muffin] paused for worker schedule — requeued\n", task_id),
+            )
+            db._conn.commit()
+        return
 
     # Remember what this worker just rendered (shown as "Last Job" in the UIs).
     if task.get("worker_id"):

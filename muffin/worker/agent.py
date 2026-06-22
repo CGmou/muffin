@@ -33,6 +33,8 @@ class Agent:
         self._current_task_id: str | None = None
         self._runner = None           # the TaskRunner currently executing
         self._stop_after = False      # finish current task, then exit
+        self._schedule_stop = False   # current render is being stopped for the schedule
+        self._standby = False         # outside the render window (manager-driven)
 
         # Capabilities = which DCCs this node will accept. The common case is a
         # homogeneous farm (every PC has every DCC), so the default is an EMPTY
@@ -52,6 +54,15 @@ class Agent:
         except requests.RequestException as exc:
             print(f"[worker] POST {path} failed: {exc}")
             return None
+
+    @staticmethod
+    def _tz_offset_min() -> int:
+        """This machine's UTC offset in minutes east (e.g. +480 for UTC+8). The
+        manager uses it to evaluate the render schedule in the worker's own local
+        time, so '09:00' means 9am here even if the manager runs on a NAS in UTC."""
+        is_dst = bool(time.daylight) and time.localtime().tm_isdst > 0
+        off_sec = -(time.altzone if is_dst else time.timezone)
+        return int(off_sec // 60)
 
     @staticmethod
     def _machine_specs() -> dict:
@@ -91,7 +102,7 @@ class Agent:
         resp = self._post(
             "/api/workers/register",
             {"name": self.name, "host": self.host, "capabilities": self.capabilities,
-             **self._machine_specs()},
+             "tz_offset": self._tz_offset_min(), **self._machine_specs()},
         )
         if resp and resp.get("id"):
             self.worker_id = resp["id"]
@@ -100,15 +111,33 @@ class Agent:
             return True
         return False
 
-    def heartbeat(self, status: str = "idle", task_id: str | None = None) -> None:
-        self._post(
+    def heartbeat(self, status: str = "idle", task_id: str | None = None) -> dict | None:
+        resp = self._post(
             f"/api/workers/{self.worker_id}/heartbeat",
-            {"status": status, "current_task_id": task_id},
+            {"status": status, "current_task_id": task_id,
+             "tz_offset": self._tz_offset_min()},
         )
+        self._apply_server_reply(resp)
+        return resp
 
     def request_task(self) -> dict | None:
         resp = self._post(f"/api/workers/{self.worker_id}/request-task")
+        self._apply_server_reply(resp)
         return resp.get("task") if resp else None
+
+    def _apply_server_reply(self, resp: dict | None) -> None:
+        """Act on the schedule signals the manager piggybacks on its replies:
+        ``standby`` (we're outside the render window) and ``command`` (stop the
+        current render so the PC is freed)."""
+        if not resp:
+            return
+        on = bool(resp.get("standby"))
+        if on != self._standby:
+            self._standby = on
+            print("[worker] standby - outside render schedule (paused)" if on
+                  else "[worker] schedule window open - resuming")
+        if resp.get("command") == "stop_render":
+            self._handle_cmd("stop_render")
 
     # ----------------------------------------------------------------- work --
     def run_task(self, assignment: dict) -> None:
@@ -134,11 +163,19 @@ class Agent:
             self._post(f"/api/tasks/{task_id}/progress",
                        {"progress": progress, "log": log})
 
+        self._schedule_stop = False
         runner = TaskRunner(assignment, report)
         self._runner = runner
         status, code, tail = runner.run()
         self._runner = None
         self._current_task_id = None
+        # If we were told to stand down for the schedule (and the frame didn't
+        # happen to finish first), report it as 'requeued' so the manager puts it
+        # back in the queue without counting a failure.
+        if self._schedule_stop and status != "done":
+            status = "requeued"
+            tail = (tail or "") + "\n[muffin] paused for worker schedule — requeued\n"
+        self._schedule_stop = False
         self._post(f"/api/tasks/{task_id}/result",
                    {"status": status, "exit_code": code, "log": tail})
         print(f"[worker] task {task_id} -> {status} (exit {code})")
@@ -151,6 +188,15 @@ class Agent:
                 runner.cancel()
             else:
                 print("[worker] stop_task: nothing rendering")
+        elif cmd == "stop_render":
+            # Schedule window closed mid-render: stop and let the manager requeue
+            # the frame (no failure counted). Different from stop_task, which is
+            # a manual cancel.
+            runner = self._runner
+            if runner:
+                print("[worker] stop_render: pausing for schedule, requeuing task")
+                self._schedule_stop = True
+                runner.cancel()
         elif cmd == "stop_after":
             self._stop_after = True
             print("[worker] will stop after the current render")

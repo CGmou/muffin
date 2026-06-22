@@ -19,6 +19,7 @@ import socket
 import subprocess
 import sys
 
+import requests
 from PySide6.QtCore import QProcess, Qt, QTimer
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
@@ -27,17 +28,23 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from .. import settings
+from .. import schedule, settings
 from .notify import Notifier
+from .schedule_widget import ScheduleEditor
 from .settings_dialog import NodeSettingsDialog
 from .style import QSS, app_icon, apply_app_icon, bring_to_front
 
 
-def _worker_title() -> str:
-    name = (os.environ.get("MUFFIN_WORKER_NAME")
+def _worker_name() -> str:
+    """This machine's worker name — the same resolution the agent uses, so the
+    Worker app can find its own record on the manager."""
+    return (os.environ.get("MUFFIN_WORKER_NAME")
             or settings.load().get("worker_name")
             or socket.gethostname())
-    return f"Muffin - {name}"
+
+
+def _worker_title() -> str:
+    return f"Muffin - {_worker_name()}"
 
 try:
     import psutil
@@ -82,6 +89,89 @@ class LogDialog(QDialog):
         self.log.setFont(QFont("Consolas", 9))
         self.log.setMaximumBlockCount(5000)
         lay.addWidget(self.log)
+
+
+class RenderScheduleDialog(QDialog):
+    """Let the artist set THIS machine's render schedule from the Worker app —
+    no need to open the Monitor. It's the same schedule the manager stores, found
+    by this worker's name, so the Monitor and this dialog stay in sync."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Render schedule — this machine")
+        self.setWindowIcon(app_icon())
+        self.resize(640, 540)
+        self.base = settings.load().get("manager_url", "").rstrip("/")
+        self.name = _worker_name()
+        self._worker_id = None
+
+        lay = QVBoxLayout(self)
+        intro = QLabel(
+            "Choose when this PC is free to render. Outside these windows Muffin "
+            "won't start a render here, and a render already running is stopped so "
+            "the machine is yours. Saved on the farm manager — the studio's "
+            "Monitor sees the same schedule.")
+        intro.setObjectName("hdr")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+
+        self.editor = ScheduleEditor()
+        lay.addWidget(self.editor)
+
+        bar = QHBoxLayout()
+        self.status = QLabel("")
+        self.status.setObjectName("hdr")
+        bar.addWidget(self.status, 1)
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setObjectName("primary")
+        self.save_btn.clicked.connect(self._save)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        bar.addWidget(self.save_btn)
+        bar.addWidget(close)
+        lay.addLayout(bar)
+
+        self._load()
+
+    def _disable(self, msg: str) -> None:
+        self.editor.setEnabled(False)
+        self.save_btn.setEnabled(False)
+        self.status.setText(msg)
+
+    def _load(self) -> None:
+        if not self.base:
+            self._disable("No manager URL set — open Settings first.")
+            return
+        try:
+            workers = requests.get(f"{self.base}/api/workers", timeout=5).json()
+        except Exception as exc:
+            self._disable(f"Can't reach the manager: {exc}")
+            return
+        w = next((x for x in workers if x.get("name") == self.name), None)
+        if not w:
+            self._disable("This machine isn't registered yet — start the worker "
+                          "once, then set its schedule.")
+            return
+        if "standby" not in w:
+            self._disable("The manager is out of date — restart it to enable "
+                          "schedules.")
+            return
+        self._worker_id = w["id"]
+        self.editor.set_schedule(bool(w.get("schedule_enabled")),
+                                 w.get("schedule") or schedule.nights_and_weekends())
+
+    def _save(self) -> None:
+        if not self._worker_id:
+            return
+        payload = {"schedule_enabled": self.editor.get_enabled(),
+                   "schedule": self.editor.get_schedule()}
+        try:
+            requests.put(f"{self.base}/api/workers/{self._worker_id}",
+                         json=payload, timeout=5).raise_for_status()
+        except Exception as exc:
+            QMessageBox.warning(self, "Error", str(exc))
+            return
+        self.status.setText("Saved — this machine's render schedule is updated.")
 
 
 # ----------------------------------------------------------- machine tab ------
@@ -217,6 +307,9 @@ class WorkerWindow(QMainWindow):
         act = QAction("Settings…", self)
         act.triggered.connect(self._open_settings)
         m.addAction(act)
+        act_sched = QAction("Render schedule…", self)
+        act_sched.triggered.connect(self._open_schedule)
+        m.addAction(act_sched)
         m.addSeparator()
         self.act_autostart = QAction("Start worker automatically on launch", self)
         self.act_autostart.setCheckable(True)
@@ -251,6 +344,9 @@ class WorkerWindow(QMainWindow):
     def _open_settings(self) -> None:
         if NodeSettingsDialog(self).exec():
             self._refresh_target()
+
+    def _open_schedule(self) -> None:
+        RenderScheduleDialog(self).exec()
 
     def _toggle_autostart(self, on: bool) -> None:
         s = settings.load()
@@ -469,6 +565,14 @@ class WorkerWindow(QMainWindow):
                 continue
             if "registered as" in line:
                 self._set_state("idle", "#d8dce3")
+            elif "outside render schedule" in line:
+                # Manager parked this worker for its schedule (work hours).
+                self._set_state("scheduled off — work hours", "#e8a13a")
+            elif "schedule window open" in line:
+                self._set_state("idle", "#d8dce3")
+            elif "-> requeued" in line:
+                # Render was paused for the schedule, not failed — requeued.
+                self._finish_task("paused", "#d9b04a")
             elif "-> done" in line:
                 job, frames = self.job_lbl.text(), self.frames_lbl.text()
                 self._finish_task("done", "#4caf72")

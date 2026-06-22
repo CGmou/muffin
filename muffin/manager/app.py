@@ -4,18 +4,25 @@ talk to. State lives in SQLite.
 Run with:  python -m muffin.manager
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 
 from ..common import schemas
 from ..dccs import catalog
 from . import db, scheduler
 
-app = FastAPI(title="Muffin Render Farm", version="0.0.1")
 
-
-@app.on_event("startup")
-def _startup() -> None:
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Initialise (and migrate) the SQLite database before serving requests. Uses
+    # the modern lifespan API — the old @app.on_event("startup") hook is removed
+    # in newer Starlette/FastAPI.
     db.init()
+    yield
+
+
+app = FastAPI(title="Muffin Render Farm", version="0.0.1", lifespan=_lifespan)
 
 
 # --------------------------------------------------------------- jobs ---------
@@ -160,8 +167,15 @@ def register_worker(reg: schemas.WorkerRegister):
 def worker_heartbeat(worker_id: str, hb: schemas.WorkerHeartbeat):
     if not db.get_worker(worker_id):
         raise HTTPException(404, "unknown worker; re-register")
-    db.heartbeat_worker(worker_id, hb.status, hb.current_task_id)
-    return {"ok": True}
+    db.heartbeat_worker(worker_id, hb.status, hb.current_task_id, hb.tz_offset)
+    # Re-read so "standby" reflects the offset we just stored. If the worker is
+    # now outside its render window AND holding a task, ask it to stop so the
+    # machine is freed for the artist; the frame is requeued without penalty.
+    worker = db.get_worker(worker_id) or {}
+    standby = bool(worker.get("standby"))
+    command = "stop_render" if (standby and hb.status == "busy"
+                                and hb.current_task_id) else None
+    return {"ok": True, "standby": standby, "command": command}
 
 
 @app.post("/api/workers/{worker_id}/request-task")
@@ -169,12 +183,13 @@ def request_task(worker_id: str):
     worker = db.get_worker(worker_id)
     if not worker:
         raise HTTPException(404, "unknown worker; re-register")
-    if not worker.get("enabled", 1):
-        return {"task": None}
+    standby = bool(worker.get("standby"))
+    if not worker.get("enabled", 1) or standby:
+        return {"task": None, "standby": standby}
     assignment = scheduler.assign_task(worker)
     if assignment:
         db.heartbeat_worker(worker_id, "busy", assignment["task_id"])
-    return {"task": assignment}
+    return {"task": assignment, "standby": standby}
 
 
 @app.put("/api/workers/{worker_id}")

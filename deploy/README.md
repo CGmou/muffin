@@ -50,6 +50,9 @@ Give the NAS a **static IP** (or DNS name) so the URL never changes.
 - The "Open Render Output" action in the Monitor opens paths on *your* machine,
   so it keeps working with a NAS-hosted manager as long as the job's output path
   is reachable from your PC (e.g. a `\\nas\…` share or mapped drive).
+- **Worker schedules need no NAS timezone setup.** Each worker reports its own
+  UTC offset, so a "render 18:00–09:00" schedule follows the *worker's* local
+  clock even though this container may run in UTC.
 
 ## Without Docker (not recommended)
 DSM ships Python 3; you can run the manager directly via Task Scheduler
